@@ -1,0 +1,167 @@
+#!/bin/sh
+# ffmpeg -y -hide_banner -thread_queue_size 64 -f alsa -i hw:1 -f alsa -i default -acodec aac -f x11grab -show_region 1 -draw_mouse 1 -r 30 -s 1366x768 -i :0.0+0,0 -c:v libx264 -preset superfast -crf 23 -pix_fmt yuv420p -threads 0 -map 0 -map 1 -map 2 /root/abc.mkv
+# the above line has two audio streams, but the audio sounds funny
+# also, blender isn't adding both audio streams to VSE tracks
+# so arecord used
+
+DL_PATH="/root/recordings"
+DESKTOP_AUDIODEVICE=1
+WEBCAM_AUDIODEVICE=2
+
+# pulse for desktop audio has to be done still
+#ffmpeg -hide_banner -f pulse -i default output.wav
+#Install pavucontrol.
+#Start recording with ffmpeg -hide_banner (see example commands below).
+#Start pavucontrol.
+#Go to the Recording tab and you will  find ffmpeg -hide_banner or Lavf56.15.102 (or similar) listed there.
+#Change audio capture from Internal Audio Analog Stereo to Monitor of Internal Audio Analog Stereo.
+
+folder_date=`date +%Y-%m-%d-%H%M_%S`
+
+mkdir -p "$DL_PATH/$folder_date"
+
+is_compton=`ps -ef | grep compton | grep -v grep | grep -v gui | wc -l`
+
+if [ $is_compton -gt 0 ] ; then
+	killall compton
+fi
+
+is_picom=`ps -ef | grep picom | grep -v grep | grep -v gui | wc -l`
+
+if [ $is_picom -gt 0 ] ; then
+	killall picom
+fi
+
+xannotate &
+
+# _____ desktop and mic audio __________
+XY=`xrandr | head -1 | cut -d, -f 2 | cut -d ' ' -f3- | sed 's/ //g'`
+# -f alsa -i default -acodec aac
+ffmpeg -hide_banner -y -thread_queue_size 64 \
+ -f alsa -i hw:1 \
+ -f x11grab -show_region 1 -draw_mouse 1 -r 30 -s $XY -i :0.0+0,0 \
+ -c:v libx264 -preset superfast -crf 23 -pix_fmt yuv420p -threads 0 \
+ "$DL_PATH/$folder_date/desktop_and_audio.mkv"  &> /dev/null &
+export PID_DESKTOP_VID=$!
+
+# _____ desktop audio __________
+#DESKTOP_AUDIODEVICE=`arecord -l | grep "card $DESKTOP_AUDIODEVICE:" | head -1 | cut -d\  -f3`
+#arecord -f S16_LE -c 2 -r 48000 -D hw:$DESKTOP_AUDIODEVICE,0 | lame - "$DL_PATH/$folder_date/desktop_audio.mp3" &>/dev/null &
+arecord -f S16_LE -c 2 -r 48000 | lame - "$DL_PATH/$folder_date/mic.mp3" &>/dev/null &
+export PID_DESKTOP_AUDIO=$!
+
+
+# _____ webcam audio __________
+WEBCAM_AUDIODEVICE=`arecord -l | grep "card $WEBCAM_AUDIODEVICE:" | head  -1 | cut -d\  -f3`
+arecord -f S16_LE -c 1 -r 16000 -D hw:$WEBCAM_AUDIODEVICE,0 | lame - "$DL_PATH/$folder_date/webcam_mic.mp3" &>/dev/null &
+export PID_WEBCAM_AUDIO=$!
+
+# modprobe snd-aloop
+# arecord -l | grep ^card
+
+
+# _____ webcam video _____
+#ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video0
+#ffmpeg -hide_banner -f video4linux2 -r 25 -i /dev/video0 -f alsa -i plughw:CARD=$WEBCAM_AUDIODEVICENAME,DEV=0 -strict experimental -acodec aac -vcodec mpeg4 -s 1280x960 -y "$DL_PATH/$folder_date/webcam_av.mp4" &> /dev/null &
+ffmpeg -hide_banner -f video4linux2 -r 30 -i /dev/video0 -strict experimental -vcodec mpeg4 -s 1280x960 -y "$DL_PATH/$folder_date/webcam_video.mp4" &> /dev/null &
+export PID_WEBCAM=$!
+
+function xannotate_hotkeys()
+{
+	yad --text="		<big><b>xannotate</b></big>
+		Pause            - toggle draw/cursor mode\n \
+		Shift-Pause      - show/hide drawing\n \
+		Ctrl-Pause       - clear drawing\n \
+		Ctrl-Shift-Pause - exit\n \
+		Alt-Shift-Pause  - screenshot\n \
+		--- Mouse usage ---\n \
+		Left-click  - pen: press to start, move to draw, release to stop\n \
+		Right-click - eraser: press to start, move to erase, release to stop\n \
+		Shift-Left-click    - switch pen\n \
+	"
+}
+export -f xannotate_hotkeys
+
+
+
+# create a FIFO file, used to manage the I/O redirection from shell
+export PIPE=$(mktemp -u --tmpdir ${0##*/}.XXXXXXXX)
+mkfifo $PIPE
+
+# attach a file descriptor to the file
+exec 5<> $PIPE
+
+# add handler to manage process shutdown
+function on_exit() {
+    echo "quit"  >$PIPE
+    rm -f $PIPE
+}
+export -f on_exit
+trap on_exit EXIT
+
+# add handler for tray icon left click
+
+echo 0 > /tmp/DESKTOP_RECORDING
+#see https://stackoverflow.com/questions/23564995/how-to-modify-a-global-variable-within-a-function-in-bash
+
+function on_click() {
+	if [ `cat /tmp/DESKTOP_RECORDING` == "0" ]; then
+		echo 1 > /tmp/DESKTOP_RECORDING
+		echo $RECORDING
+		RECORDING=1
+		export RECORDING=1
+
+		ps -p $PID_DESKTOP_VID >/dev/null && kill -STOP $PID_DESKTOP_VID
+		ps -p $PID_DESKTOP_AUDIO >/dev/null && kill -STOP $PID_DESKTOP_AUDIO
+		ps -p $PID_WEBCAM_AUDIO >/dev/null && kill -STOP $PID_WEBCAM_AUDIO
+		ps -p $PID_WEBCAM >/dev/null && kill -STOP $PID_WEBCAM
+
+		echo "icon:desktop_record_pause" >$PIPE
+		echo "visible:blink" >$PIPE
+	else
+		echo 0 > /tmp/DESKTOP_RECORDING
+
+		ps -p $PID_DESKTOP_VID >/dev/null && kill -CONT $PID_DESKTOP_VID
+		ps -p $PID_DESKTOP_AUDIO >/dev/null && kill -STOP $PID_DESKTOP_AUDIO
+		ps -p $PID_WEBCAM_AUDIO >/dev/null && kill -CONT $PID_WEBCAM_AUDIO
+		ps -p $PID_WEBCAM >/dev/null && kill -CONT $PID_WEBCAM
+
+		echo "icon:desktop_record" >$PIPE
+		echo "visible:blink" >$PIPE
+	fi
+}
+export -f on_click
+
+
+# read -p 'Press any key to finish recording' -n1 -s
+yad --notification \
+	--image="desktop_record" \
+	--text="L-click=pause   M-click - stop/save recordings   R-click - menu" \
+	--item-separator=~ \
+	--menu="xannote shortcuts~sh -c 'xannotate_hotkeys'~gtk-home|Quit~quit~gtk-quit" \
+    --listen \
+	--command="bash -c 'on_click'" <&5
+
+ps -p $PID_DESKTOP_VID >/dev/null && kill -CONT $PID_DESKTOP_VID
+ps -p $PID_DESKTOP_AUDIO >/dev/null && kill -CONT $PID_DESKTOP_AUDIO
+ps -p $PID_WEBCAM_AUDIO >/dev/null && kill -CONT $PID_WEBCAM_AUDIO
+ps -p $PID_WEBCAM >/dev/null && kill -CONT $PID_WEBCAM
+
+ps -p $PID_DESKTOP_VID >/dev/null && kill $PID_DESKTOP_VID
+ps -p $PID_DESKTOP_AUDIO >/dev/null && kill $PID_DESKTOP_AUDIO
+ps -p $PID_WEBCAM_AUDIO >/dev/null && kill $PID_WEBCAM_AUDIO
+ps -p $PID_WEBCAM >/dev/null && kill $PID_WEBCAM
+killall xannotate
+
+if [ $is_compton -gt 0 ] ; then
+	compton &
+fi
+
+if [ $is_picom -gt 0 ] ; then
+	picom --config /root/.config/picom/picom.conf &
+fi
+
+FILENAME=$(yad --file --filename="$DL_PATH/$folder_date/" )
+
+xdg-open "$FILENAME"
+

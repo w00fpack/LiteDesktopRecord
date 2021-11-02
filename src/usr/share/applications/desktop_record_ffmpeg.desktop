@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Capture App Window Desktop video (ffmpeg)
+Exec=desktop_record_ffmpeg
+Icon=desktop_record
+Categories=Recorder
+Terminal=true
+
